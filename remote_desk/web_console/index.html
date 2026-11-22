@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Asistencia AO" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="icon" type="image/png" href="/icon-192.png" />
+  <title>Asistencia Remota Antonio Ortega</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --input: #0b1220;
+      --fg: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --success: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; padding: 0; height: 100%; width: 100%;
+      background: var(--bg); color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      overscroll-behavior: none;
+    }
+    .hidden { display: none !important; }
+
+    /* Vista Consola */
+    #console-view {
+      max-width: 720px; margin: 0 auto;
+      padding: calc(14px + env(safe-area-inset-top)) 14px calc(24px + env(safe-area-inset-bottom));
+    }
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 14px; gap: 10px;
+    }
+    .header-title { font-size: 19px; font-weight: 700; margin: 0; }
+    .header-sub { font-size: 12px; color: var(--accent); font-weight: 600; margin-top: 2px; }
+    .badge {
+      background: #082f49; color: var(--accent); padding: 5px 10px;
+      border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap;
+    }
+
+    .install-tip {
+      background: #082f49; border: 1px solid #0369a1; border-radius: 12px;
+      padding: 10px 12px; margin-bottom: 12px; font-size: 13px; color: #e0f2fe;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    }
+    .install-tip button {
+      background: transparent; border: none; color: #7dd3fc; font-size: 16px; padding: 4px;
+    }
+
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 14px; margin-bottom: 14px;
+    }
+    .card-title {
+      color: var(--accent); font-size: 13px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.4px; margin: 0 0 10px;
+    }
+    .field { margin-bottom: 10px; }
+    .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row > * { flex: 1; }
+    .row > .shrink { flex: 0 0 auto; }
+
+    input[type="text"], input[type="password"], input[type="url"], select {
+      width: 100%; background: var(--input); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 10px;
+      padding: 11px 12px; font-size: 16px; outline: none;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+
+    .check-row {
+      display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg);
+      margin: 8px 0 12px;
+    }
+    .check-row input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+    .btn {
+      border: none; border-radius: 10px; padding: 11px 14px;
+      font-size: 15px; font-weight: 700; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      background: var(--border); color: var(--fg);
+    }
+    .btn:active { opacity: 0.85; transform: scale(0.99); }
+    .btn-primary { background: var(--success); color: #052e16; width: 100%; }
+    .btn-accent { background: var(--accent); color: #082f49; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-sm { padding: 7px 10px; font-size: 13px; border-radius: 8px; }
+
+    /* Lista de PCs */
+    .peer-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+    .peer-item {
+      background: var(--input); border: 1px solid var(--border);
+      border-radius: 12px; padding: 12px;
+    }
+    .peer-top {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    }
+    .peer-name { font-size: 16px; font-weight: 700; color: var(--fg); }
+    .peer-meta { font-size: 12px; color: var(--muted); margin-top: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .peer-actions {
+      display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+    }
+    .empty-state { text-align: center; color: var(--muted); padding: 20px 10px; font-size: 14px; }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(2, 6, 23, 0.8);
+      display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50;
+    }
+    .modal {
+      width: 100%; max-width: 420px; background: var(--card);
+      border: 1px solid var(--border); border-radius: 16px; padding: 16px;
+    }
+    .modal h3 { margin: 0 0 12px; font-size: 17px; color: var(--accent); }
+
+    /* Vista Visor Remoto (Pantalla completa iPhone) */
+    #viewer-view {
+      position: fixed; inset: 0; background: #020617;
+      display: flex; flex-direction: column; z-index: 30;
+    }
+    .viewer-top {
+      background: rgba(30, 41, 59, 0.96); border-bottom: 1px solid var(--border);
+      padding: calc(6px + env(safe-area-inset-top)) 10px 6px;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); flex: 0 0 auto; }
+    .dot.ok { background: var(--success); }
+    .dot.err { background: var(--danger); }
+    .viewer-status { font-size: 12px; font-weight: 700; flex: 1; min-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .viewer-stats { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+    .viewer-top select {
+      width: auto; padding: 5px 8px; font-size: 12px; border-radius: 7px;
+    }
+
+    #file-banner {
+      background: #082f49; color: #e0f2fe; font-size: 12px; font-weight: 600;
+      padding: 6px 12px; border-bottom: 1px solid #0369a1;
+    }
+    #file-banner.ok { background: #052e16; color: #bbf7d0; border-color: #16a34a; }
+    #file-banner.err { background: #450a0a; color: #fecaca; border-color: #dc2626; }
+
+    #canvas-wrap {
+      flex: 1; position: relative; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      touch-action: none;
+    }
+    #remote-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    #viewer-overlay-msg {
+      position: absolute; text-align: center; padding: 16px 20px;
+      color: var(--muted); font-size: 14px; pointer-events: none;
+    }
+
+    #shortcuts-bar {
+      background: #0f172a; border-top: 1px solid var(--border);
+      padding: 6px 8px; display: flex; gap: 6px; overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    #shortcuts-bar .btn-sm { white-space: nowrap; flex: 0 0 auto; }
+
+    .viewer-dock {
+      background: rgba(30, 41, 59, 0.98); border-top: 1px solid var(--border);
+      padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+      display: flex; gap: 6px; justify-content: space-around; align-items: center;
+    }
+    .dock-btn {
+      flex: 1; background: var(--input); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 10px;
+      padding: 9px 6px; font-size: 12px; font-weight: 700;
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      cursor: pointer;
+    }
+    .dock-btn.active { border-color: var(--accent); color: var(--accent); background: #082f49; }
+
+    #ios-kb-input {
+      position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ======================== CONSOLA ======================== -->
+  <div id="console-view">
+    <div class="header">
+      <div>
+        <h1 class="header-title">🖥 Asistencia Remota</h1>
+        <div class="header-sub">Antonio Ortega • Consola iPhone</div>
+      </div>
+      <div class="badge">AES-256-GCM</div>
+    </div>
+
+    <div id="ios-install-tip" class="install-tip hidden">
+      <span>📲 <b>Instala esta app en tu iPhone:</b> pulsa <b>Compartir</b> (↑) en Safari y elige <b>Añadir a pantalla de inicio</b>.</span>
+      <button id="btn-dismiss-tip" aria-label="Cerrar">✕</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Conexión rápida</div>
+      <div class="field">
+        <label for="inp-relay">URL del Servidor Relay (ws:// o wss://)</label>
+        <input id="inp-relay" type="url" autocomplete="off" autocapitalize="none" spellcheck="false" />
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="inp-id">ID del PC remoto</label>
+          <input id="inp-id" type="text" inputmode="numeric" placeholder="Ej: 915-520-915" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="inp-alias">Nombre (opcional)</label>
+          <input id="inp-alias" type="text" placeholder="Ej: PC Oficina" />
+        </div>
+      </div>
+      <div class="field">
+        <label for="inp-pwd">Contraseña</label>
+        <div class="row">
+          <input id="inp-pwd" type="password" value="AntonioOrtega@" autocomplete="off" />
+          <button id="btn-toggle-pwd" class="btn btn-sm shrink" type="button">Ver</button>
+        </div>
+      </div>
+      <label class="check-row">
+        <input id="chk-remember" type="checkbox" checked />
+        <span>Guardar equipo y contraseña en mi lista</span>
+      </label>
+      <button id="btn-connect" class="btn btn-primary" type="button">🔗 Conectar al PC Remoto</button>
+    </div>
+
+    <div class="card">
+      <div class="row" style="margin-bottom: 8px;">
+        <div class="card-title" style="margin:0;">Mis PCs guardados</div>
+        <span id="peer-count" style="text-align:right;font-size:12px;color:var(--muted);">0 equipos</span>
+      </div>
+      <input id="inp-search" type="text" placeholder="🔍 Buscar equipo por nombre o ID..." />
+      <div id="peer-list" class="peer-list"></div>
+    </div>
+  </div>
+
+  <!-- ======================== VISOR REMOTO ======================== -->
+  <div id="viewer-view" class="hidden">
+    <div class="viewer-top">
+      <span id="v-dot" class="dot"></span>
+      <span id="v-status" class="viewer-status">Conectando...</span>
+      <span id="v-stats" class="viewer-stats"></span>
+      <select id="v-monitor" aria-label="Monitor"></select>
+      <select id="v-quality" aria-label="Calidad">
+        <option value="low">Fluido</option>
+        <option value="mid" selected>Equilibrado</option>
+        <option value="high">Alta</option>
+      </select>
+      <button id="btn-disconnect" class="btn btn-danger btn-sm" type="button">Salir</button>
+    </div>
+
+    <div id="file-banner" class="hidden"></div>
+
+    <div id="canvas-wrap">
+      <canvas id="remote-canvas"></canvas>
+      <div id="viewer-overlay-msg">Estableciendo túnel cifrado AES-256-GCM...</div>
+    </div>
+
+    <div id="shortcuts-bar" class="hidden">
+      <button class="btn btn-sm" data-combo="win">⊞ Win</button>
+      <button class="btn btn-sm" data-combo="alt_tab">Alt+Tab</button>
+      <button class="btn btn-sm" data-combo="taskmgr">Admin. Tareas</button>
+      <button class="btn btn-sm" data-combo="win_d">Escritorio</button>
+      <button class="btn btn-sm" data-key="Escape">Esc</button>
+      <button class="btn btn-sm" data-key="Delete">Supr</button>
+      <button class="btn btn-sm" data-key="Tab">Tab</button>
+      <button class="btn btn-sm" data-ctrl="c">Ctrl+C</button>
+      <button class="btn btn-sm" data-ctrl="v">Ctrl+V</button>
+      <button class="btn btn-sm" data-scroll="240">▲ Subir</button>
+      <button class="btn btn-sm" data-scroll="-240">▼ Bajar</button>
+    </div>
+
+    <div class="viewer-dock">
+      <button id="dock-mode" class="dock-btn active" type="button">
+        <span>🖱️</span><span id="dock-mode-lbl">Trackpad</span>
+      </button>
+      <button id="dock-rclick" class="dock-btn" type="button">
+        <span>👆</span><span>Clic Der.</span>
+      </button>
+      <button id="dock-kb" class="dock-btn" type="button">
+        <span>⌨️</span><span>Teclado</span>
+      </button>
+      <button id="dock-shortcuts" class="dock-btn" type="button">
+        <span>⚡</span><span>Atajos</span>
+      </button>
+      <button id="dock-file" class="dock-btn" type="button">
+        <span>📁</span><span>Archivo</span>
+      </button>
+    </div>
+
+    <input id="ios-kb-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" />
+    <input id="file-picker" type="file" multiple class="hidden" />
+  </div>
+
+  <!-- ======================== MODAL EDITAR / RENOMBRAR ======================== -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3 id="modal-title">Editar equipo</h3>
+      <div class="field">
+        <label for="m-alias">Nombre del equipo</label>
+        <input id="m-alias" type="text" />
+      </div>
+      <div class="field">
+        <label for="m-relay">URL del Relay</label>
+        <input id="m-relay" type="url" autocomplete="off" autocapitalize="none" />
+      </div>
+      <div class="field">
+        <label for="m-pwd">Contraseña guardada (deja vacío para no cambiar)</label>
+        <input id="m-pwd" type="password" placeholder="••••••••" />
+      </div>
+      <div class="row" style="margin-top: 14px;">
+        <button id="m-cancel" class="btn" type="button">Cancelar</button>
+        <button id="m-save" class="btn btn-accent" type="button">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/crypto.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
