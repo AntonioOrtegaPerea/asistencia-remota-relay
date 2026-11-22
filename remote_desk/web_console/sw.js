@@ -1,4 +1,4 @@
-const CACHE_NAME = "asistencia-ao-v3";
+const CACHE_NAME = "asistencia-ao-v4";
 const ASSETS = ["/", "/crypto.js", "/app.js", "/manifest.json", "/icon-192.png"];
 
 self.addEventListener("install", (event) => {

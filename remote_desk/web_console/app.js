@@ -4,6 +4,7 @@
 
   const DEFAULT_PASSWORD = "AntonioOrtega@";
   const PEERS_KEY = "ao_remote_peers_v1";
+  const DELETED_KEY = "ao_remote_deleted_v1";
   const RELAY_KEY = "ao_remote_relay_url_v1";
 
   // Tipos de mensaje binarios (idénticos a remote_desk/protocol.py)
@@ -53,7 +54,13 @@
   function loadPeers() {
     try {
       const raw = JSON.parse(localStorage.getItem(PEERS_KEY) || "[]");
-      return Array.isArray(raw) ? raw : [];
+      if (!Array.isArray(raw)) return [];
+      return raw.map((p) => ({
+        ...p,
+        mode: p.mode === "direct" ? "direct" : "relay",
+        key: p.key || `${p.mode === "direct" ? "direct" : "relay"}:${normalizeSessionId(p.id || p.target || "")}`,
+        updated_at: Number(p.updated_at || 0) || Date.now(),
+      }));
     } catch {
       return [];
     }
@@ -63,34 +70,263 @@
     localStorage.setItem(PEERS_KEY, JSON.stringify(list));
   }
 
+  function loadDeleted() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(DELETED_KEY) || "{}");
+      return raw && typeof raw === "object" ? raw : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveDeleted(obj) {
+    localStorage.setItem(DELETED_KEY, JSON.stringify(obj));
+  }
+
+  function makePeerKey(mode, target) {
+    const m = mode === "direct" ? "direct" : "relay";
+    const t = m === "relay" ? normalizeSessionId(target) : String(target || "").trim().toLowerCase();
+    return `${m}:${t}`;
+  }
+
   function upsertPeer({ id, alias, hostname, relayUrl, password, remember }) {
     const normId = normalizeSessionId(id);
+    const key = makePeerKey("relay", normId);
     const list = loadPeers();
-    const now = new Date().toLocaleString("es-ES", {
-      day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit",
-    });
-    let rec = list.find((p) => p.id === normId);
+    const deleted = loadDeleted();
+    delete deleted[key];
+    saveDeleted(deleted);
+
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const nowMs = Date.now();
+    let rec = list.find((p) => p.id === normId || p.key === key);
     if (!rec) {
       rec = {
+        key,
+        mode: "relay",
         id: normId,
         alias: (alias || hostname || normId).trim(),
         hostname: hostname || "",
         relayUrl: relayUrl || defaultRelayUrl(),
         password: remember ? password : "",
         favorite: false,
+        notes: "",
         lastConnected: now,
+        updated_at: nowMs,
       };
       list.unshift(rec);
     } else {
+      rec.key = key;
       if (alias && alias.trim()) rec.alias = alias.trim();
       else if (hostname && (!rec.alias || rec.alias === rec.id)) rec.alias = hostname;
       if (hostname) rec.hostname = hostname;
       if (relayUrl) rec.relayUrl = relayUrl;
       if (remember && password) rec.password = password;
       rec.lastConnected = now;
+      rec.updated_at = nowMs;
     }
     savePeers(list);
     renderPeerList();
+    triggerCloudSync();
+  }
+
+  // =========================================================================
+  // Sincronización en la nube cifrada E2E (PC Windows <-> iPhone)
+  // =========================================================================
+  let cachedVaultKeys = null;
+  let syncInProgress = false;
+  let syncPending = false;
+
+  function setSyncLabel(text, color) {
+    const el = $("sync-status");
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = color || "var(--muted)";
+  }
+
+  function exportSyncPayload() {
+    const peers = loadPeers().map((p) => ({
+      key: p.key || makePeerKey(p.mode || "relay", p.id),
+      mode: p.mode === "direct" ? "direct" : "relay",
+      target: p.id,
+      alias: p.alias || "",
+      hostname: p.hostname || "",
+      relay_url: p.relayUrl || defaultRelayUrl(),
+      password: p.password || "",
+      favorite: !!p.favorite,
+      notes: p.notes || "",
+      last_connected: p.lastConnected || "",
+      connect_count: Number(p.connectCount || 1),
+      updated_at: Number(p.updated_at || Date.now()),
+    }));
+    return { version: 1, peers, deleted: loadDeleted() };
+  }
+
+  function mergeSyncPayload(remote) {
+    const localList = loadPeers();
+    const localMap = new Map(localList.map((p) => [p.key || makePeerKey(p.mode || "relay", p.id), p]));
+    const localDeleted = loadDeleted();
+    const remoteDeleted = (remote && typeof remote.deleted === "object" && remote.deleted) ? remote.deleted : {};
+    const remoteMap = new Map();
+
+    for (const item of (remote && Array.isArray(remote.peers) ? remote.peers : [])) {
+      if (!item || typeof item !== "object") continue;
+      const mode = item.mode === "direct" ? "direct" : "relay";
+      const target = String(item.target || item.id || "").trim();
+      if (!target) continue;
+      const cleanTarget = mode === "relay" ? normalizeSessionId(target) : target;
+      const key = item.key || makePeerKey(mode, cleanTarget);
+      remoteMap.set(key, {
+        key,
+        mode,
+        id: cleanTarget,
+        alias: String(item.alias || ""),
+        hostname: String(item.hostname || ""),
+        relayUrl: String(item.relay_url || defaultRelayUrl()),
+        password: String(item.password || ""),
+        favorite: !!item.favorite,
+        notes: String(item.notes || ""),
+        lastConnected: String(item.last_connected || ""),
+        connectCount: Number(item.connect_count || 0),
+        updated_at: Number(item.updated_at || Date.now()),
+      });
+    }
+
+    const allKeys = new Set([
+      ...localMap.keys(),
+      ...remoteMap.keys(),
+      ...Object.keys(localDeleted),
+      ...Object.keys(remoteDeleted),
+    ]);
+
+    let localChanged = false;
+    let remoteNeedsPush = false;
+
+    for (const key of allKeys) {
+      const lRec = localMap.get(key);
+      const rRec = remoteMap.get(key);
+      const lDel = Number(localDeleted[key] || 0);
+      const rDel = Number(remoteDeleted[key] || 0);
+      const lTs = Math.max(lRec ? Number(lRec.updated_at || 0) : 0, lDel);
+      const rTs = Math.max(rRec ? Number(rRec.updated_at || 0) : 0, rDel);
+
+      if (rTs > lTs) {
+        if (rDel >= (rRec ? Number(rRec.updated_at || 0) : 0)) {
+          if (localMap.has(key)) { localMap.delete(key); localChanged = true; }
+          if (localDeleted[key] !== rDel) { localDeleted[key] = rDel; localChanged = true; }
+        } else if (rRec) {
+          localMap.set(key, rRec);
+          delete localDeleted[key];
+          localChanged = true;
+        }
+      } else if (lTs > rTs) {
+        remoteNeedsPush = true;
+      }
+    }
+
+    if (localChanged) {
+      savePeers(Array.from(localMap.values()));
+      saveDeleted(localDeleted);
+    }
+    return { localChanged, remoteNeedsPush };
+  }
+
+  async function triggerCloudSync() {
+    const relayUrl = ($("inp-relay").value || "").trim() || defaultRelayUrl();
+    if (!/^wss?:\/\//i.test(relayUrl)) return;
+    if (syncInProgress) { syncPending = true; return; }
+
+    syncInProgress = true;
+    syncPending = false;
+    setSyncLabel("☁️ Sincronizando...", "var(--warn)");
+
+    try {
+      if (!cachedVaultKeys) {
+        cachedVaultKeys = await AOCrypto.deriveVaultKeys(DEFAULT_PASSWORD);
+      }
+      const keys = cachedVaultKeys;
+
+      const result = await new Promise((resolve, reject) => {
+        const sock = new WebSocket(relayUrl);
+        let stage = "pull";
+        const timer = setTimeout(() => {
+          try { sock.close(); } catch {}
+          reject(new Error("Tiempo de espera agotado"));
+        }, 45000);
+
+        sock.onopen = () => {
+          sock.send(JSON.stringify({
+            type: "vault_pull",
+            vault_id: keys.vaultId,
+            auth_token: keys.authToken,
+          }));
+        };
+        sock.onerror = () => {
+          clearTimeout(timer);
+          reject(new Error("No se pudo conectar al servidor"));
+        };
+        sock.onmessage = async (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "error") {
+              clearTimeout(timer);
+              sock.close();
+              reject(new Error(msg.message || "Error de sincronización"));
+              return;
+            }
+            if (stage === "pull" && msg.type === "vault_data") {
+              let localChanged = false;
+              let needsPush = false;
+              if (msg.exists && msg.nonce_b64 && msg.ciphertext_b64) {
+                const remoteObj = await AOCrypto.decryptVaultPayload(keys.encKey, msg.nonce_b64, msg.ciphertext_b64);
+                const merged = mergeSyncPayload(remoteObj);
+                localChanged = merged.localChanged;
+                needsPush = merged.remoteNeedsPush;
+              } else {
+                needsPush = loadPeers().length > 0;
+              }
+
+              if (needsPush) {
+                stage = "push";
+                const payload = exportSyncPayload();
+                const enc = await AOCrypto.encryptVaultPayload(keys.encKey, payload);
+                sock.send(JSON.stringify({
+                  type: "vault_push",
+                  vault_id: keys.vaultId,
+                  auth_token: keys.authToken,
+                  updated_at: Date.now(),
+                  nonce_b64: enc.nonceB64,
+                  ciphertext_b64: enc.ciphertextB64,
+                }));
+              } else {
+                clearTimeout(timer);
+                sock.close();
+                resolve({ localChanged });
+              }
+            } else if (stage === "push" && msg.type === "vault_saved") {
+              clearTimeout(timer);
+              sock.close();
+              resolve({ localChanged: false });
+            }
+          } catch (err) {
+            clearTimeout(timer);
+            try { sock.close(); } catch {}
+            reject(err);
+          }
+        };
+      });
+
+      if (result.localChanged) renderPeerList();
+      setSyncLabel("☁️ Sincronizado (PC + iPhone)", "var(--success)");
+    } catch {
+      setSyncLabel("☁️ Sin conexión al servidor", "var(--muted)");
+    } finally {
+      syncInProgress = false;
+      if (syncPending) {
+        syncPending = false;
+        setTimeout(triggerCloudSync, 300);
+      }
+    }
   }
 
   function packJson(msgType, obj) {
@@ -727,22 +963,38 @@
         if (next && next.trim()) {
           const peers = loadPeers();
           const item = peers.find((x) => x.id === p.id);
-          if (item) { item.alias = next.trim(); savePeers(peers); renderPeerList(); }
+          if (item) {
+            item.alias = next.trim();
+            item.updated_at = Date.now();
+            savePeers(peers);
+            renderPeerList();
+            triggerCloudSync();
+          }
         }
       };
 
       div.querySelector('[data-act="fav"]').onclick = () => {
         const peers = loadPeers();
         const item = peers.find((x) => x.id === p.id);
-        if (item) { item.favorite = !item.favorite; savePeers(peers); renderPeerList(); }
+        if (item) {
+          item.favorite = !item.favorite;
+          item.updated_at = Date.now();
+          savePeers(peers);
+          renderPeerList();
+          triggerCloudSync();
+        }
       };
 
       div.querySelector('[data-act="edit"]').onclick = () => openEditModal(p);
 
       div.querySelector('[data-act="delete"]').onclick = () => {
         if (confirm(`¿Eliminar '${p.alias || p.id}' de tu lista?`)) {
+          const deleted = loadDeleted();
+          deleted[p.key || makePeerKey(p.mode || "relay", p.id)] = Date.now();
+          saveDeleted(deleted);
           savePeers(loadPeers().filter((x) => x.id !== p.id));
           renderPeerList();
+          triggerCloudSync();
         }
       };
 
@@ -860,11 +1112,19 @@
       item.relayUrl = $("m-relay").value.trim() || defaultRelayUrl();
       const newPwd = $("m-pwd").value.trim();
       if (newPwd) item.password = newPwd;
+      item.updated_at = Date.now();
       savePeers(peers);
       renderPeerList();
+      triggerCloudSync();
     }
     $("modal-backdrop").classList.add("hidden");
   };
+
+  $("btn-sync").onclick = triggerCloudSync;
+  setTimeout(triggerCloudSync, 400);
+  setInterval(() => {
+    if (!connected) triggerCloudSync();
+  }, 25000);
 
   window.addEventListener("resize", resizeCanvas);
 

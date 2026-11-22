@@ -12,6 +12,7 @@ from pathlib import Path
 
 DEFAULT_RELAY_PORT = 8765
 DEFAULT_DIRECT_PORT = 8766
+DEFAULT_RELAY_URL = "wss://asistencia-remota-antonio-ortega.onrender.com"
 DEFAULT_FIXED_PASSWORD = "AntonioOrtega@"
 
 
@@ -112,7 +113,7 @@ def get_local_ip() -> str:
 
 @dataclass
 class AppConfig:
-    relay_url: str = f"ws://127.0.0.1:{DEFAULT_RELAY_PORT}"
+    relay_url: str = DEFAULT_RELAY_URL
     session_id: str = ""
     host_mode: str = "relay"  # "relay" | "direct"
     direct_port: int = DEFAULT_DIRECT_PORT
@@ -146,6 +147,9 @@ def load_config(filename: str = "config.json") -> AppConfig:
                     setattr(cfg, key, value)
         except (OSError, json.JSONDecodeError, TypeError):
             pass
+    # Actualiza automáticamente configuraciones antiguas que apuntaban solo a localhost
+    if not cfg.relay_url or cfg.relay_url.strip().rstrip("/") in ("ws://127.0.0.1:8765", "ws://localhost:8765"):
+        cfg.relay_url = DEFAULT_RELAY_URL
     cfg.ensure_defaults()
     return cfg
 

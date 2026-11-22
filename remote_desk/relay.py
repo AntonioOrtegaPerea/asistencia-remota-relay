@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import json
 import logging
 import os
+import re
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +29,8 @@ logger = logging.getLogger("winremotedesk.relay")
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 60.0
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024  # 16 MB
+MAX_VAULT_BYTES = 512 * 1024  # 512 KB máximo por agenda cifrada
+_VAULT_ID_RE = re.compile(r"^[0-9a-fA-F]{16,64}$")
 
 _STATIC_MIME: dict[str, str] = {
     "/": "text/html; charset=utf-8",
@@ -61,14 +66,42 @@ class RelaySession:
 
 
 class RelayServer:
-    """Puente WebSocket seguro con verificación desafío-respuesta y paso ciego E2E."""
+    """Puente WebSocket seguro con verificación desafío-respuesta, paso ciego E2E y bóveda de agenda."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765) -> None:
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765, vault_dir: Path | None = None) -> None:
         self.host = host
         self.port = port
         self._sessions: dict[str, RelaySession] = {}
         self._ws_to_role: dict[ServerConnection, tuple[str, str]] = {}
         self._server: Server | None = None
+        if vault_dir is not None:
+            self._vault_dir = vault_dir
+        else:
+            env_dir = os.environ.get("VAULT_DIR")
+            self._vault_dir = Path(env_dir) if env_dir else (Path(tempfile.gettempdir()) / "ao_remote_vaults")
+        self._vault_dir.mkdir(parents=True, exist_ok=True)
+        self._vaults: dict[str, dict[str, Any]] = {}
+        self._load_persisted_vaults()
+
+    def _load_persisted_vaults(self) -> None:
+        try:
+            for p in self._vault_dir.glob("*.json"):
+                vid = p.stem
+                if not _VAULT_ID_RE.match(vid):
+                    continue
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("auth_token") and data.get("ciphertext_b64"):
+                    self._vaults[vid] = data
+        except Exception:
+            pass
+
+    def _persist_vault(self, vault_id: str, record: dict[str, Any]) -> None:
+        try:
+            self._vault_dir.mkdir(parents=True, exist_ok=True)
+            path = self._vault_dir / f"{vault_id}.json"
+            path.write_text(json.dumps(record, separators=(",", ":")), encoding="utf-8")
+        except OSError:
+            pass
 
     @property
     def active_session_count(self) -> int:
@@ -207,10 +240,68 @@ class RelayServer:
             await self._on_authenticate(ws, msg)
         elif msg_type == "disconnect_client":
             await self._on_host_kick_client(ws)
+        elif msg_type == "vault_pull":
+            await self._on_vault_pull(ws, msg)
+        elif msg_type == "vault_push":
+            await self._on_vault_push(ws, msg)
         elif msg_type == "ping":
             await self._send_json(ws, {"type": "pong"})
         else:
             await self._send_json(ws, {"type": "error", "message": f"Comando desconocido: {msg_type}"})
+
+    async def _on_vault_pull(self, ws: ServerConnection, msg: dict[str, Any]) -> None:
+        vault_id = str(msg.get("vault_id", "")).strip()
+        auth_token = str(msg.get("auth_token", "")).strip()
+        if not _VAULT_ID_RE.match(vault_id) or not auth_token:
+            await self._send_json(ws, {"type": "error", "message": "Solicitud de bóveda inválida."})
+            return
+        record = self._vaults.get(vault_id)
+        if record is None:
+            await self._send_json(ws, {"type": "vault_data", "exists": False})
+            return
+        if not hmac.compare_digest(str(record.get("auth_token", "")), auth_token):
+            await self._send_json(ws, {"type": "error", "message": "Clave de sincronización incorrecta."})
+            return
+        await self._send_json(
+            ws,
+            {
+                "type": "vault_data",
+                "exists": True,
+                "updated_at": int(record.get("updated_at", 0)),
+                "nonce_b64": str(record.get("nonce_b64", "")),
+                "ciphertext_b64": str(record.get("ciphertext_b64", "")),
+            },
+        )
+
+    async def _on_vault_push(self, ws: ServerConnection, msg: dict[str, Any]) -> None:
+        vault_id = str(msg.get("vault_id", "")).strip()
+        auth_token = str(msg.get("auth_token", "")).strip()
+        nonce_b64 = str(msg.get("nonce_b64", "")).strip()
+        ciphertext_b64 = str(msg.get("ciphertext_b64", "")).strip()
+        updated_at = int(msg.get("updated_at", 0) or 0)
+
+        if not _VAULT_ID_RE.match(vault_id) or not auth_token or not nonce_b64 or not ciphertext_b64:
+            await self._send_json(ws, {"type": "error", "message": "Datos de bóveda incompletos."})
+            return
+        if len(ciphertext_b64) > MAX_VAULT_BYTES:
+            await self._send_json(ws, {"type": "error", "message": "La agenda excede el tamaño máximo permitido."})
+            return
+
+        existing = self._vaults.get(vault_id)
+        if existing is not None:
+            if not hmac.compare_digest(str(existing.get("auth_token", "")), auth_token):
+                await self._send_json(ws, {"type": "error", "message": "Clave de sincronización incorrecta."})
+                return
+
+        record = {
+            "auth_token": auth_token,
+            "updated_at": updated_at,
+            "nonce_b64": nonce_b64,
+            "ciphertext_b64": ciphertext_b64,
+        }
+        self._vaults[vault_id] = record
+        self._persist_vault(vault_id, record)
+        await self._send_json(ws, {"type": "vault_saved", "updated_at": updated_at})
 
     async def _on_register_host(self, ws: ServerConnection, msg: dict[str, Any]) -> None:
         session_id = normalize_session_id(str(msg.get("session_id", "")))

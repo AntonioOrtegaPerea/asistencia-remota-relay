@@ -237,8 +237,14 @@
 
     <div class="card">
       <div class="row" style="margin-bottom: 8px;">
-        <div class="card-title" style="margin:0;">Mis PCs guardados</div>
-        <span id="peer-count" style="text-align:right;font-size:12px;color:var(--muted);">0 equipos</span>
+        <div>
+          <div class="card-title" style="margin:0;">Mis PCs guardados</div>
+          <div id="sync-status" style="font-size:11px;color:var(--muted);margin-top:2px;">☁️ Sincronizando...</div>
+        </div>
+        <div class="shrink" style="display:flex;align-items:center;gap:8px;">
+          <span id="peer-count" style="font-size:12px;color:var(--muted);">0 equipos</span>
+          <button id="btn-sync" class="btn btn-sm" type="button">☁️ Sincronizar</button>
+        </div>
       </div>
       <input id="inp-search" type="text" placeholder="🔍 Buscar equipo por nombre o ID..." />
       <div id="peer-list" class="peer-list"></div>

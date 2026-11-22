@@ -7,6 +7,11 @@
   const PBKDF2_ITERATIONS = 100000;
   const AUTH_LABEL = new TextEncoder().encode("winremotedesk-auth-v1");
   const ENC_LABEL = new TextEncoder().encode("winremotedesk-e2e-v1");
+  const VAULT_SALT = new TextEncoder().encode("asistencia-ao-vault-salt-v1");
+  const VAULT_ID_LABEL = new TextEncoder().encode("vault-id-v1");
+  const VAULT_AUTH_LABEL = new TextEncoder().encode("vault-auth-v1");
+  const VAULT_ENC_LABEL = new TextEncoder().encode("vault-enc-v1");
+  const VAULT_AAD = new TextEncoder().encode("ao-vault-v1");
   const HAS_SUBTLE = !!(global.crypto && global.crypto.subtle);
 
   function bytesToBase64(bytes) {
@@ -408,6 +413,72 @@
     }
   }
 
+  async function deriveVaultKeys(passphrase) {
+    const passBytes = new TextEncoder().encode(passphrase);
+    let master;
+    if (HAS_SUBTLE) {
+      const baseKey = await global.crypto.subtle.importKey(
+        "raw", passBytes, { name: "PBKDF2" }, false, ["deriveBits"]
+      );
+      const bits = await global.crypto.subtle.deriveBits(
+        { name: "PBKDF2", salt: VAULT_SALT, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+        baseKey,
+        256
+      );
+      master = new Uint8Array(bits);
+    } else {
+      master = await pbkdf2Sha256Pure(passBytes, VAULT_SALT, PBKDF2_ITERATIONS);
+    }
+    const vaultIdBytes = await hmacSha256(master, VAULT_ID_LABEL);
+    const authBytes = await hmacSha256(master, VAULT_AUTH_LABEL);
+    const encKey = await hmacSha256(master, VAULT_ENC_LABEL);
+    return {
+      vaultId: bytesToHex(vaultIdBytes).slice(0, 32),
+      authToken: bytesToBase64(authBytes),
+      encKey,
+    };
+  }
+
+  async function encryptVaultPayload(encKey, obj) {
+    const raw = new TextEncoder().encode(JSON.stringify(obj));
+    const nonce = randomBytes(12);
+    let ct;
+    if (HAS_SUBTLE) {
+      const key = await global.crypto.subtle.importKey("raw", encKey, { name: "AES-GCM" }, false, ["encrypt"]);
+      const buf = await global.crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: nonce, additionalData: VAULT_AAD },
+        key,
+        raw
+      );
+      ct = new Uint8Array(buf);
+    } else {
+      const rk = aes256ExpandKey(encKey);
+      const H = aes256EncryptBlock(rk, new Uint8Array(16));
+      ct = aesGcmEncryptPure(rk, H, nonce, raw, VAULT_AAD);
+    }
+    return { nonceB64: bytesToBase64(nonce), ciphertextB64: bytesToBase64(ct) };
+  }
+
+  async function decryptVaultPayload(encKey, nonceB64, ciphertextB64) {
+    const nonce = base64ToBytes(nonceB64);
+    const ct = base64ToBytes(ciphertextB64);
+    let plain;
+    if (HAS_SUBTLE) {
+      const key = await global.crypto.subtle.importKey("raw", encKey, { name: "AES-GCM" }, false, ["decrypt"]);
+      const buf = await global.crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: nonce, additionalData: VAULT_AAD },
+        key,
+        ct
+      );
+      plain = new Uint8Array(buf);
+    } else {
+      const rk = aes256ExpandKey(encKey);
+      const H = aes256EncryptBlock(rk, new Uint8Array(16));
+      plain = aesGcmDecryptPure(rk, H, nonce, ct, VAULT_AAD);
+    }
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
   global.AOCrypto = {
     HAS_SUBTLE,
     bytesToBase64,
@@ -417,5 +488,8 @@
     deriveSessionKeys,
     computeAuthProof,
     E2ECipher,
+    deriveVaultKeys,
+    encryptVaultPayload,
+    decryptVaultPayload,
   };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -5,15 +5,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 import struct
 from dataclasses import dataclass
+from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 PBKDF2_ITERATIONS = 100_000
 SALT_SIZE = 16
 NONCE_SIZE = 12
+VAULT_SALT = b"asistencia-ao-vault-salt-v1"
 
 
 @dataclass(frozen=True)
@@ -101,3 +104,50 @@ class E2ECipher:
         plaintext = self._aes.decrypt(nonce, ciphertext, aad)
         self._recv_seq = seq
         return plaintext
+
+
+@dataclass(frozen=True)
+class VaultKeys:
+    """Claves derivadas para sincronización E2E de la agenda de PCs."""
+
+    vault_id: str
+    auth_token: str
+    enc_key: bytes
+
+
+def derive_vault_keys(passphrase: str) -> VaultKeys:
+    """Deriva ID de bóveda, token de autorización y clave AES-256-GCM desde la clave compartida."""
+    if not passphrase:
+        raise ValueError("La clave de sincronización no puede estar vacía.")
+    master = hashlib.pbkdf2_hmac(
+        "sha256",
+        passphrase.encode("utf-8"),
+        VAULT_SALT,
+        PBKDF2_ITERATIONS,
+        dklen=32,
+    )
+    vault_id = hmac.new(master, b"vault-id-v1", hashlib.sha256).hexdigest()[:32]
+    auth_token = base64.b64encode(
+        hmac.new(master, b"vault-auth-v1", hashlib.sha256).digest()
+    ).decode("ascii")
+    enc_key = hmac.new(master, b"vault-enc-v1", hashlib.sha256).digest()
+    return VaultKeys(vault_id=vault_id, auth_token=auth_token, enc_key=enc_key)
+
+
+def encrypt_vault_payload(enc_key: bytes, payload: dict[str, Any]) -> tuple[str, str]:
+    """Cifra la agenda JSON con AES-256-GCM devolviendo (nonce_b64, ciphertext_b64)."""
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    nonce = os.urandom(NONCE_SIZE)
+    ct = AESGCM(enc_key).encrypt(nonce, raw, b"ao-vault-v1")
+    return (
+        base64.b64encode(nonce).decode("ascii"),
+        base64.b64encode(ct).decode("ascii"),
+    )
+
+
+def decrypt_vault_payload(enc_key: bytes, nonce_b64: str, ciphertext_b64: str) -> dict[str, Any]:
+    """Descifra la agenda cifrada E2E."""
+    nonce = base64.b64decode(nonce_b64.encode("ascii"))
+    ct = base64.b64decode(ciphertext_b64.encode("ascii"))
+    raw = AESGCM(enc_key).decrypt(nonce, ct, b"ao-vault-v1")
+    return json.loads(raw.decode("utf-8"))
