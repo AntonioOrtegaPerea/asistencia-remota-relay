@@ -244,10 +244,31 @@ class RelayServer:
             await self._on_vault_pull(ws, msg)
         elif msg_type == "vault_push":
             await self._on_vault_push(ws, msg)
+        elif msg_type == "check_presence":
+            await self._on_check_presence(ws, msg)
         elif msg_type == "ping":
             await self._send_json(ws, {"type": "pong"})
         else:
             await self._send_json(ws, {"type": "error", "message": f"Comando desconocido: {msg_type}"})
+
+    async def _on_check_presence(self, ws: ServerConnection, msg: dict[str, Any]) -> None:
+        raw_ids = msg.get("session_ids")
+        if not isinstance(raw_ids, list):
+            await self._send_json(ws, {"type": "presence_status", "statuses": {}})
+            return
+        statuses: dict[str, str] = {}
+        for item in raw_ids[:200]:
+            sid = normalize_session_id(str(item))
+            if not sid:
+                continue
+            session = self._sessions.get(sid)
+            if session is None:
+                statuses[sid] = "offline"
+            elif session.client_ws is not None:
+                statuses[sid] = "busy"
+            else:
+                statuses[sid] = "online"
+        await self._send_json(ws, {"type": "presence_status", "statuses": statuses})
 
     async def _on_vault_pull(self, ws: ServerConnection, msg: dict[str, Any]) -> None:
         vault_id = str(msg.get("vault_id", "")).strip()

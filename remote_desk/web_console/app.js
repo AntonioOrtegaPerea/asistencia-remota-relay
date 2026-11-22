@@ -136,6 +136,59 @@
   let cachedVaultKeys = null;
   let syncInProgress = false;
   let syncPending = false;
+  let presenceInProgress = false;
+  const peerPresence = {}; // { "915-520-915": "online" | "busy" | "offline" }
+
+  async function refreshPresence() {
+    if (presenceInProgress || connected) return;
+    const peers = loadPeers();
+    if (!peers.length) return;
+    const byRelay = new Map();
+    const defUrl = ($("inp-relay").value || "").trim() || defaultRelayUrl();
+    for (const p of peers) {
+      if (p.mode === "direct") continue;
+      const url = (p.relayUrl || defUrl || "").trim();
+      if (!/^wss?:\/\//i.test(url)) continue;
+      if (!byRelay.has(url)) byRelay.set(url, []);
+      byRelay.get(url).push(p.id);
+    }
+    if (!byRelay.size) return;
+
+    presenceInProgress = true;
+    try {
+      await Promise.all(
+        Array.from(byRelay.entries()).map(([url, ids]) =>
+          new Promise((resolve) => {
+            let done = false;
+            const finish = () => { if (!done) { done = true; resolve(); } };
+            const sock = new WebSocket(url);
+            const timer = setTimeout(() => { try { sock.close(); } catch {} finish(); }, 12000);
+            sock.onopen = () => {
+              sock.send(JSON.stringify({ type: "check_presence", session_ids: ids }));
+            };
+            sock.onerror = () => { clearTimeout(timer); finish(); };
+            sock.onclose = () => { clearTimeout(timer); finish(); };
+            sock.onmessage = (ev) => {
+              try {
+                const msg = JSON.parse(ev.data);
+                if (msg.type === "presence_status" && msg.statuses) {
+                  for (const id of ids) {
+                    peerPresence[id] = msg.statuses[id] || "offline";
+                  }
+                }
+              } catch {}
+              clearTimeout(timer);
+              try { sock.close(); } catch {}
+              finish();
+            };
+          })
+        )
+      );
+      renderPeerList();
+    } finally {
+      presenceInProgress = false;
+    }
+  }
 
   function setSyncLabel(text, color) {
     const el = $("sync-status");
@@ -318,6 +371,7 @@
 
       if (result.localChanged) renderPeerList();
       setSyncLabel("☁️ Sincronizado (PC + iPhone)", "var(--success)");
+      refreshPresence();
     } catch {
       setSyncLabel("☁️ Sin conexión al servidor", "var(--muted)");
     } finally {
@@ -377,6 +431,9 @@
   let drawRect = { x: 0, y: 0, w: 1, h: 1 };
   let cursorNorm = { x: 0.5, y: 0.5 };
   let trackpadMode = true; // Trackpad por defecto: ideal para iPhone!
+  let forceRotate90 = false; // Permite horizontal incluso con el bloqueo de giro del iPhone activado
+  let fillHorizontalFull = true; // En horizontal ocupa 100% de ancho y 100% de alto sin franjas negras
+  let immersiveMode = false;
   let lastMoveSent = 0;
 
   // Telemetría
@@ -423,8 +480,10 @@
   function resizeCanvas() {
     const wrap = $("canvas-wrap");
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.max(1, Math.floor(wrap.clientWidth * dpr));
-    canvas.height = Math.max(1, Math.floor(wrap.clientHeight * dpr));
+    const w = wrap.clientWidth || window.innerWidth;
+    const h = wrap.clientHeight || window.innerHeight;
+    canvas.width = Math.max(1, Math.floor(w * dpr));
+    canvas.height = Math.max(1, Math.floor(h * dpr));
     renderCanvas();
   }
 
@@ -437,11 +496,56 @@
 
     const iw = currentImg.naturalWidth || currentImg.width;
     const ih = currentImg.naturalHeight || currentImg.height;
-    const scale = Math.min(cw / iw, ch / ih);
-    const dw = Math.max(1, Math.round(iw * scale));
-    const dh = Math.max(1, Math.round(ih * scale));
-    const ox = Math.floor((cw - dw) / 2);
-    const oy = Math.floor((ch - dh) / 2);
+
+    if (forceRotate90) {
+      // Rota el escritorio 90° horarios para aprovechar la pantalla completa en horizontal
+      let dw, dh, ox, oy;
+      if (fillHorizontalFull) {
+        dw = ch;
+        dh = cw;
+        ox = 0;
+        oy = 0;
+      } else {
+        const scale = Math.min(cw / ih, ch / iw);
+        dw = Math.max(1, Math.round(iw * scale));
+        dh = Math.max(1, Math.round(ih * scale));
+        ox = Math.floor((cw - dh) / 2);
+        oy = Math.floor((ch - dw) / 2);
+      }
+      drawRect = { x: ox, y: oy, w: dh, h: dw };
+
+      ctx.save();
+      ctx.translate(cw / 2, ch / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(currentImg, -dw / 2, -dh / 2, dw, dh);
+      if (trackpadMode) {
+        const px = -dw / 2 + cursorNorm.x * dw;
+        const py = -dh / 2 + cursorNorm.y * dh;
+        ctx.beginPath();
+        ctx.arc(px, py, 9, 0, Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+      ctx.restore();
+      return;
+    }
+
+    const isLandscape = cw > ch;
+    let ox, oy, dw, dh;
+    if (isLandscape && fillHorizontalFull) {
+      // En horizontal ocupa el 100% del ancho y el 100% del alto (full screen sin franjas negras)
+      ox = 0;
+      oy = 0;
+      dw = cw;
+      dh = ch;
+    } else {
+      const scale = Math.min(cw / iw, ch / ih);
+      dw = Math.max(1, Math.round(iw * scale));
+      dh = Math.max(1, Math.round(ih * scale));
+      ox = Math.floor((cw - dw) / 2);
+      oy = Math.floor((ch - dh) / 2);
+    }
     drawRect = { x: ox, y: oy, w: dw, h: dh };
 
     ctx.drawImage(currentImg, ox, oy, dw, dh);
@@ -469,10 +573,36 @@
     if (cx < drawRect.x || cx > drawRect.x + drawRect.w || cy < drawRect.y || cy > drawRect.y + drawRect.h) {
       return null;
     }
-    return {
-      x: Math.max(0, Math.min(1, (cx - drawRect.x) / drawRect.w)),
-      y: Math.max(0, Math.min(1, (cy - drawRect.y) / drawRect.h)),
-    };
+    const u = Math.max(0, Math.min(1, (cx - drawRect.x) / drawRect.w));
+    const v = Math.max(0, Math.min(1, (cy - drawRect.y) / drawRect.h));
+    if (forceRotate90) {
+      // Mapeo inverso de rotación 90° horaria: x_remoto = v, y_remoto = 1 - u
+      return { x: v, y: 1 - u };
+    }
+    return { x: u, y: v };
+  }
+
+  function setImmersive(enabled) {
+    immersiveMode = !!enabled;
+    $("viewer-view").classList.toggle("immersive", immersiveMode);
+    $("floating-controls-btn").classList.toggle("hidden", !immersiveMode);
+    setTimeout(resizeCanvas, 40);
+    setTimeout(resizeCanvas, 220);
+  }
+
+  function requestNativeFullscreenIfSupported() {
+    const el = $("viewer-view");
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) {
+      try { req.call(el); } catch {}
+    }
+  }
+
+  function exitNativeFullscreenIfActive() {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit && (document.fullscreenElement || document.webkitFullscreenElement)) {
+      try { exit.call(document); } catch {}
+    }
   }
 
   // =========================================================================
@@ -576,6 +706,10 @@
           frameCount = 0;
           bytesCount = 0;
           setViewerStatus("ok", alias || normId);
+          // Si ya está el iPhone en horizontal al conectar, entra directo en pantalla completa full
+          if (window.innerWidth > window.innerHeight) {
+            setImmersive(true);
+          }
           pingTimer = setInterval(() => {
             if (connected) queueEncryptedSend(packPing(Math.round(performance.now())));
           }, 2500);
@@ -686,9 +820,13 @@
 
   function closeViewer() {
     cleanupSocketOnly();
+    exitNativeFullscreenIfActive();
+    forceRotate90 = false;
+    setImmersive(false);
     $("viewer-view").classList.add("hidden");
     $("console-view").classList.remove("hidden");
     $("ios-kb-input").blur();
+    refreshPresence();
   }
 
   // =========================================================================
@@ -801,8 +939,14 @@
       if (trackpadMode) {
         const rect = canvas.getBoundingClientRect();
         const sens = 1.45;
-        cursorNorm.x = Math.max(0, Math.min(1, cursorNorm.x + (dx * sens) / Math.max(1, rect.width)));
-        cursorNorm.y = Math.max(0, Math.min(1, cursorNorm.y + (dy * sens) / Math.max(1, rect.height)));
+        if (forceRotate90) {
+          // Con pantalla rotada 90° horarios: deslizar abajo -> derecha remota, deslizar izquierda -> abajo remoto
+          cursorNorm.x = Math.max(0, Math.min(1, cursorNorm.x + (dy * sens) / Math.max(1, rect.height)));
+          cursorNorm.y = Math.max(0, Math.min(1, cursorNorm.y - (dx * sens) / Math.max(1, rect.width)));
+        } else {
+          cursorNorm.x = Math.max(0, Math.min(1, cursorNorm.x + (dx * sens) / Math.max(1, rect.width)));
+          cursorNorm.y = Math.max(0, Math.min(1, cursorNorm.y + (dy * sens) / Math.max(1, rect.height)));
+        }
         sendInput({ kind: "mouse_move", x: cursorNorm.x, y: cursorNorm.y });
         renderCanvas();
       } else {
@@ -913,7 +1057,11 @@
     }
     list.sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
 
-    $("peer-count").textContent = `${list.length} de ${total} equipos`;
+    const onlineCount = list.filter((p) => {
+      const s = peerPresence[p.id];
+      return s === "online" || s === "busy";
+    }).length;
+    $("peer-count").textContent = `🟢 ${onlineCount} • ${list.length}/${total}`;
     const container = $("peer-list");
     container.innerHTML = "";
 
@@ -927,10 +1075,19 @@
       div.className = "peer-item";
       const favStar = p.favorite ? "★ " : "";
       const pwdBadge = p.password ? "🔒 Clave guardada" : "Pedir clave";
+      const st = peerPresence[p.id] || "unknown";
+      const isOnline = st === "online" || st === "busy";
+      const ledClass = isOnline ? "led led-online" : (st === "offline" ? "led led-offline" : "led");
+      const pillClass = isOnline ? "status-pill online" : (st === "offline" ? "status-pill offline" : "status-pill unknown");
+      const pillText = st === "online" ? "En línea" : (st === "busy" ? "En sesión" : (st === "offline" ? "Desconectado" : "..."));
       div.innerHTML = `
         <div class="peer-top">
           <div>
-            <div class="peer-name">${escapeHtml(favStar + (p.alias || p.id))}</div>
+            <div class="peer-name">
+              <span class="${ledClass}"></span>
+              <span>${escapeHtml(favStar + (p.alias || p.id))}</span>
+              <span class="${pillClass}">${pillText}</span>
+            </div>
             <div class="peer-meta">ID: ${escapeHtml(p.id)} • ${pwdBadge} • ${escapeHtml(p.lastConnected || "")}</div>
           </div>
           <button class="btn btn-accent btn-sm" data-act="connect">Conectar</button>
@@ -1041,6 +1198,59 @@
   $("inp-search").addEventListener("input", renderPeerList);
   $("btn-disconnect").onclick = closeViewer;
 
+  $("btn-fit").onclick = () => {
+    fillHorizontalFull = !fillHorizontalFull;
+    $("btn-fit").textContent = fillHorizontalFull ? "↔ Full" : "↔ Prop.";
+    $("btn-fit").classList.toggle("btn-accent", fillHorizontalFull);
+    renderCanvas();
+  };
+
+  $("btn-fullscreen").onclick = () => {
+    setImmersive(!immersiveMode);
+    if (immersiveMode) requestNativeFullscreenIfSupported();
+    else exitNativeFullscreenIfActive();
+  };
+
+  $("floating-controls-btn").onclick = () => {
+    setImmersive(false);
+    exitNativeFullscreenIfActive();
+  };
+
+  $("btn-rotate").onclick = () => {
+    forceRotate90 = !forceRotate90;
+    $("btn-rotate").classList.toggle("btn-accent", forceRotate90);
+    if (forceRotate90) {
+      // Al girar a horizontal forzado, pasa a pantalla completa inmersiva automáticamente
+      setImmersive(true);
+    } else {
+      resizeCanvas();
+    }
+  };
+
+  function handleViewportChange() {
+    if ($("viewer-view").classList.contains("hidden")) return;
+    window.scrollTo(0, 0);
+    const isLandscape = window.innerWidth > window.innerHeight;
+    if (isLandscape && forceRotate90) {
+      // Si el usuario giró físicamente el iPhone a horizontal, desactiva la rotación manual
+      forceRotate90 = false;
+      $("btn-rotate").classList.remove("btn-accent");
+    }
+    // Al girar el iPhone a horizontal, entra automáticamente en pantalla completa sin barras
+    if (isLandscape && !immersiveMode) {
+      setImmersive(true);
+    }
+    setTimeout(resizeCanvas, 50);
+    setTimeout(resizeCanvas, 200);
+    setTimeout(resizeCanvas, 450);
+  }
+
+  window.addEventListener("resize", handleViewportChange);
+  window.addEventListener("orientationchange", handleViewportChange);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", handleViewportChange);
+  }
+
   $("v-monitor").onchange = (e) => {
     queueEncryptedSend(packJson(MSG_SETTINGS, { monitor: parseInt(e.target.value, 10) }));
   };
@@ -1120,13 +1330,15 @@
     $("modal-backdrop").classList.add("hidden");
   };
 
-  $("btn-sync").onclick = triggerCloudSync;
+  $("btn-sync").onclick = () => { triggerCloudSync(); refreshPresence(); };
   setTimeout(triggerCloudSync, 400);
+  setTimeout(refreshPresence, 900);
+  setInterval(() => {
+    if (!connected) refreshPresence();
+  }, 8000);
   setInterval(() => {
     if (!connected) triggerCloudSync();
   }, 25000);
-
-  window.addEventListener("resize", resizeCanvas);
 
   // Banner de instalación PWA solo en iOS Safari cuando aún no está instalada
   const isIos = /iPhone|iPad|iPod/i.test(navigator.userAgent);
