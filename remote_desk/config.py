@@ -117,9 +117,9 @@ class AppConfig:
     session_id: str = ""
     host_mode: str = "relay"  # "relay" | "direct"
     direct_port: int = DEFAULT_DIRECT_PORT
-    quality: int = 65
-    scale: float = 0.85
-    fps: int = 20
+    quality: int = 78
+    scale: float = 1.0
+    fps: int = 28
     monitor: int = 1
     allow_control: bool = True
     # Acceso desatendido (Agente Remoto): por defecto siempre activo con contraseña fija

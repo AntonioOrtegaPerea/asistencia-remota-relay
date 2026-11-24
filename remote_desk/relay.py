@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -113,6 +114,7 @@ class RelayServer:
             self.host,
             self.port,
             max_size=MAX_MESSAGE_BYTES,
+            compression=None,
             ping_interval=20,
             ping_timeout=20,
             process_request=self._process_http_request,
@@ -194,6 +196,13 @@ class RelayServer:
             pass
 
     async def _handle_connection(self, ws: ServerConnection) -> None:
+        # Desactiva algoritmo de Nagle (TCP_NODELAY) para latencia mínima en vídeo y ratón
+        try:
+            sock = ws.transport.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
         try:
             async for message in ws:
                 if isinstance(message, bytes):

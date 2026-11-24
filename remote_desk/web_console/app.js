@@ -16,6 +16,7 @@
   const MSG_PING = 0x06;
   const MSG_PONG = 0x07;
   const MSG_CONTROL_STATUS = 0x08;
+  const MSG_TILES = 0x09;
   const MSG_FILE_START = 0x10;
   const MSG_FILE_CHUNK = 0x11;
   const MSG_FILE_END = 0x12;
@@ -23,9 +24,9 @@
   const FILE_CHUNK_SIZE = 64 * 1024;
 
   const QUALITY_PRESETS = {
-    low: { quality: 45, scale: 0.65, fps: 14 },
-    mid: { quality: 62, scale: 0.80, fps: 18 },
-    high: { quality: 80, scale: 0.95, fps: 24 },
+    low: { quality: 60, scale: 0.80, fps: 20 },
+    mid: { quality: 78, scale: 1.00, fps: 28 },
+    high: { quality: 88, scale: 1.00, fps: 30 },
   };
 
   const encoder = new TextEncoder();
@@ -427,7 +428,10 @@
   let pingTimer = null;
   let activeSessionMeta = null;
 
-  let currentImg = null;
+  // Framebuffer persistente offscreen para composición instantánea de bloques (dirty tiles)
+  const fbCanvas = document.createElement("canvas");
+  const fbCtx = fbCanvas.getContext("2d", { alpha: false });
+  let hasFrame = false;
   let drawRect = { x: 0, y: 0, w: 1, h: 1 };
   let cursorNorm = { x: 0.5, y: 0.5 };
   let trackpadMode = true; // Trackpad por defecto: ideal para iPhone!
@@ -435,6 +439,22 @@
   let fillHorizontalFull = true; // En horizontal ocupa 100% de ancho y 100% de alto sin franjas negras
   let immersiveMode = false;
   let lastMoveSent = 0;
+
+  async function decodeJpegBitmap(jpegUint8) {
+    const blob = new Blob([jpegUint8], { type: "image/jpeg" });
+    if (typeof createImageBitmap === "function") {
+      try {
+        return await createImageBitmap(blob);
+      } catch {}
+    }
+    return await new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+      img.src = url;
+    });
+  }
 
   // Telemetría
   let frameCount = 0;
@@ -465,7 +485,7 @@
     if (!connected) return;
     if (ev.kind === "mouse_move") {
       const now = performance.now();
-      if (now - lastMoveSent < 22) return;
+      if (now - lastMoveSent < 14) return;
       lastMoveSent = now;
     }
     queueEncryptedSend(packJson(MSG_INPUT, ev));
@@ -492,10 +512,10 @@
     const ch = canvas.height;
     ctx.fillStyle = "#020617";
     ctx.fillRect(0, 0, cw, ch);
-    if (!currentImg) return;
+    if (!hasFrame || fbCanvas.width <= 0 || fbCanvas.height <= 0) return;
 
-    const iw = currentImg.naturalWidth || currentImg.width;
-    const ih = currentImg.naturalHeight || currentImg.height;
+    const iw = fbCanvas.width;
+    const ih = fbCanvas.height;
 
     if (forceRotate90) {
       // Rota el escritorio 90° horarios para aprovechar la pantalla completa en horizontal
@@ -517,7 +537,7 @@
       ctx.save();
       ctx.translate(cw / 2, ch / 2);
       ctx.rotate(Math.PI / 2);
-      ctx.drawImage(currentImg, -dw / 2, -dh / 2, dw, dh);
+      ctx.drawImage(fbCanvas, -dw / 2, -dh / 2, dw, dh);
       if (trackpadMode) {
         const px = -dw / 2 + cursorNorm.x * dw;
         const py = -dh / 2 + cursorNorm.y * dh;
@@ -548,7 +568,7 @@
     }
     drawRect = { x: ox, y: oy, w: dw, h: dh };
 
-    ctx.drawImage(currentImg, ox, oy, dw, dh);
+    ctx.drawImage(fbCanvas, ox, oy, dw, dh);
 
     // En modo Trackpad dibuja un aro guía sutil para ver la posición exacta del puntero
     if (trackpadMode) {
@@ -641,7 +661,7 @@
     $("viewer-overlay-msg").textContent = "Conectando y negociando cifrado AES-256-GCM...";
     $("viewer-overlay-msg").classList.remove("hidden");
     $("v-stats").textContent = "";
-    currentImg = null;
+    hasFrame = false;
     resizeCanvas();
     setViewerStatus("warn", `Conectando a ${alias || normId}...`);
 
@@ -774,30 +794,65 @@
       queueEncryptedSend(packFrameAck(tsMs));
 
       const jpeg = body.subarray(9);
-      const blob = new Blob([jpeg], { type: "image/jpeg" });
-      const url = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        currentImg = img;
+      try {
+        const bmp = await decodeJpegBitmap(jpeg);
+        const bw = bmp.width || bmp.naturalWidth;
+        const bh = bmp.height || bmp.naturalHeight;
+        if (fbCanvas.width !== bw || fbCanvas.height !== bh) {
+          fbCanvas.width = bw;
+          fbCanvas.height = bh;
+        }
+        fbCtx.drawImage(bmp, 0, 0);
+        if (typeof bmp.close === "function") bmp.close();
+        hasFrame = true;
         $("viewer-overlay-msg").classList.add("hidden");
         renderCanvas();
-      };
-      img.onerror = () => URL.revokeObjectURL(url);
-      img.src = url;
+      } catch {}
 
-      frameCount++;
-      bytesCount += packet.length;
-      const now = performance.now();
-      const dt = (now - statsStart) / 1000;
-      if (dt >= 1.0) {
-        lastFps = frameCount / dt;
-        lastKbps = (bytesCount / 1024) / dt;
-        frameCount = 0;
-        bytesCount = 0;
-        statsStart = now;
-        $("v-stats").textContent = `${lastFps.toFixed(0)} FPS • ${lastLatency}ms • ${lastKbps.toFixed(0)} KB/s`;
+      recordFrameStats(packet.length);
+    } else if (msgType === MSG_TILES) {
+      if (body.length < 11) return;
+      const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+      const fullW = dv.getUint16(0, false);
+      const fullH = dv.getUint16(2, false);
+      const tsMs = dv.getUint32(5, false);
+      const count = dv.getUint16(9, false);
+      queueEncryptedSend(packFrameAck(tsMs));
+
+      if (fbCanvas.width !== fullW || fbCanvas.height !== fullH) {
+        fbCanvas.width = Math.max(1, fullW);
+        fbCanvas.height = Math.max(1, fullH);
       }
+
+      let off = 11;
+      const jobs = [];
+      for (let i = 0; i < count; i++) {
+        if (off + 12 > body.length) break;
+        const tx = dv.getUint16(off, false);
+        const ty = dv.getUint16(off + 2, false);
+        const tw = dv.getUint16(off + 4, false);
+        const th = dv.getUint16(off + 6, false);
+        const dlen = dv.getUint32(off + 8, false);
+        off += 12;
+        if (off + dlen > body.length) break;
+        const tileSlice = body.subarray(off, off + dlen);
+        off += dlen;
+        jobs.push(
+          decodeJpegBitmap(tileSlice)
+            .then((bmp) => ({ tx, ty, tw, th, bmp }))
+            .catch(() => null)
+        );
+      }
+      const decoded = await Promise.all(jobs);
+      for (const item of decoded) {
+        if (!item) continue;
+        fbCtx.drawImage(item.bmp, item.tx, item.ty, item.tw, item.th);
+        if (typeof item.bmp.close === "function") item.bmp.close();
+      }
+      hasFrame = true;
+      $("viewer-overlay-msg").classList.add("hidden");
+      renderCanvas();
+      recordFrameStats(packet.length);
     } else if (msgType === MSG_FILE_STATUS) {
       const info = JSON.parse(decoder.decode(body));
       if (info.status === "ok") {
@@ -805,6 +860,21 @@
       } else if (info.status === "error") {
         showFileBanner(`✖ Error: ${info.message || "Transferencia fallida"}`, "err", 7000);
       }
+    }
+  }
+
+  function recordFrameStats(byteLen) {
+    frameCount++;
+    bytesCount += byteLen;
+    const now = performance.now();
+    const dt = (now - statsStart) / 1000;
+    if (dt >= 1.0) {
+      lastFps = frameCount / dt;
+      lastKbps = (bytesCount / 1024) / dt;
+      frameCount = 0;
+      bytesCount = 0;
+      statsStart = now;
+      $("v-stats").textContent = `${lastFps.toFixed(0)} FPS • ${lastLatency}ms • ${lastKbps.toFixed(0)} KB/s`;
     }
   }
 
